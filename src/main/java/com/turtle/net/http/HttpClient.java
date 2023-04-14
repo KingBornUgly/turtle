@@ -1,0 +1,631 @@
+/**
+ * Copyright(c) 2018 Sunyur.com, All Rights Reserved. Author: KingBornUgly Create date: 2023/1/4
+ */
+package com.turtle.net.http;
+
+import com.turtle.config.SystemConfig;
+import com.turtle.exception.NetException;
+import com.turtle.model.wrapper.HttpHeaderWrapper;
+import com.turtle.utils.IoUtils;
+import com.turtle.utils.MapUtils;
+import com.turtle.utils.NumberUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.net.ssl.*;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import java.util.Arrays;
+import java.util.Map;
+
+/**
+ * HTTP客户端
+ * 配置参考：https://docs.oracle.com/javase/8/docs/technotes/guides/security/StandardNames.html
+ * 推荐直接使用HTTP协议下载：HTTPS下载CPU占用较高
+ * @author KingBornUgly
+ * @date 2023/1/4 9:57 PM
+ */
+public final class HttpClient {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(HttpClient.class);
+
+    /**
+     * <p>HTTP状态码</p>
+     * <p>协议链接：https://www.ietf.org/rfc/rfc2616</p>
+     *
+     * @author turtle
+     */
+    public enum StatusCode {
+
+        /**
+         * <p>成功</p>
+         */
+        OK(200),
+        /**
+         * <p>部分内容</p>
+         * <p>断点续传</p>
+         */
+        PARTIAL_CONTENT(206),
+        /**
+         * <p>无法满足请求范围</p>
+         */
+        REQUESTED_RANGE_NOT_SATISFIABLE(416),
+        /**
+         * <p>服务器错误</p>
+         */
+        INTERNAL_SERVER_ERROR(500);
+
+        /**
+         * <p>状态码</p>
+         */
+        private final int code;
+
+        /**
+         * @param code 状态码
+         */
+        private StatusCode(int code) {
+            this.code = code;
+        }
+
+        /**
+         * <p>获取状态码</p>
+         *
+         * @return 状态码
+         */
+        public final int code() {
+            return this.code;
+        }
+
+        /**
+         * <p>判断状态码是否相等</p>
+         *
+         * @param code 状态码
+         *
+         * @return 是否相等
+         */
+        public final boolean verifyCode(int code) {
+            return this.code == code;
+        }
+
+    }
+
+    /**
+     * <p>请求方式</p>
+     *
+     * @author turtle
+     */
+    public enum Method {
+
+        /**
+         * <p>GET请求</p>
+         */
+        GET,
+        /**
+         * <p>HEAD请求</p>
+         */
+        HEAD,
+        /**
+         * <p>POST请求</p>
+         */
+        POST;
+
+    }
+
+    /**
+     * <p>HTTP客户端信息（User-Agent）</p>
+     */
+    private static final String USER_AGENT;
+
+    static {
+        final StringBuilder userAgentBuilder = new StringBuilder();
+        userAgentBuilder
+                .append("Mozilla/5.0")
+                .append(" ")
+                .append("(compatible; ")
+                .append(SystemConfig.getNameEn())
+                .append("/")
+                .append(SystemConfig.getVersion())
+                .append(")");
+        USER_AGENT = userAgentBuilder.toString();
+        LOGGER.debug("HTTP客户端信息（User-Agent）：{}", USER_AGENT);
+        // 配置HTTPS
+        final SSLContext sslContext = buildSSLContext();
+        if(sslContext != null) {
+            HttpsURLConnection.setDefaultHostnameVerifier(HttpClient.TURTLEHostnameVerifier.INSTANCE);
+            HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.getSocketFactory());
+        }
+    }
+
+    /**
+     * <p>请求地址</p>
+     */
+    private final String url;
+    /**
+     * <p>请求连接</p>
+     */
+    private final HttpURLConnection httpURLConnection;
+    /**
+     * <p>状态码</p>
+     */
+    private int code;
+    /**
+     * <p>响应头</p>
+     */
+    private HttpHeaderWrapper httpHeaderWrapper;
+
+    /**
+     * @param url 请求地址
+     * @param connectTimeout 连接超时时间（毫秒）
+     * @param receiveTimeout 响应超时时间（毫秒）
+     *
+     * @throws NetException 网络异常
+     */
+    private HttpClient(String url, int connectTimeout, int receiveTimeout) throws NetException {
+        this.url = url;
+        this.httpURLConnection = this.buildHttpURLConnection(connectTimeout, receiveTimeout);
+        this.buildDefaultHeader();
+    }
+
+    /**
+     * <p>新建下载HTTP客户端</p>
+     *
+     * @param url 请求地址
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public static final HttpClient newDownloader(String url) throws NetException {
+        return newInstance(url, SystemConfig.CONNECT_TIMEOUT_MILLIS, SystemConfig.DOWNLOAD_TIMEOUT_MILLIS);
+    }
+
+    /**
+     * <p>新建HTTP客户端</p>
+     *
+     * @param url 请求地址
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public static final HttpClient newInstance(String url) throws NetException {
+        return newInstance(url, SystemConfig.CONNECT_TIMEOUT_MILLIS, SystemConfig.RECEIVE_TIMEOUT_MILLIS);
+    }
+
+    /**
+     * <p>新建HTTP客户端</p>
+     *
+     * @param url 请求地址
+     * @param connectTimeout 连接超时时间（毫秒）
+     * @param receiveTimeout 响应超时时间（毫秒）
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public static final HttpClient newInstance(String url, int connectTimeout, int receiveTimeout) throws NetException {
+        return new HttpClient(url, connectTimeout, receiveTimeout);
+    }
+
+    /**
+     * <p>使用缓存</p>
+     *
+     * @return {@link HttpClient}
+     */
+    public HttpClient cache() {
+        this.httpURLConnection.setUseCaches(true);
+        return this;
+    }
+
+    /**
+     * <p>设置请求头</p>
+     *
+     * @param key 请求头名称
+     * @param value 请求头值
+     *
+     * @return {@link HttpClient}
+     */
+    public HttpClient header(String key, String value) {
+        this.httpURLConnection.setRequestProperty(key, value);
+        return this;
+    }
+
+    /**
+     * <p>启用长连接（默认）</p>
+     *
+     * @return {@link HttpClient}
+     */
+    public HttpClient keepAlive() {
+        return this.header("Connection", "keep-alive");
+    }
+
+    /**
+     * <p>禁用长连接</p>
+     *
+     * @return {@link HttpClient}
+     */
+    public HttpClient disableKeepAlive() {
+        return this.header("Connection", "close");
+    }
+
+    /**
+     * <p>设置请求范围</p>
+     *
+     * @param pos 开始位置
+     *
+     * @return {@link HttpClient}
+     */
+    public HttpClient range(long pos) {
+        return this.header(HttpHeaderWrapper.HEADER_RANGE, "bytes=" + pos + "-");
+    }
+
+    /**
+     * <p>执行GET请求</p>
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public HttpClient get() throws NetException {
+        return this.execute(HttpClient.Method.GET, null);
+    }
+
+    /**
+     * <p>执行HEAD请求</p>
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public HttpClient head() throws NetException {
+        return this.execute(HttpClient.Method.HEAD, null);
+    }
+
+    /**
+     * <p>执行POST请求</p>
+     *
+     * @param data 请求数据
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public HttpClient post(String data) throws NetException {
+        this.header(HttpHeaderWrapper.HEADER_CONTENT_TYPE, "application/json");
+        return this.execute(HttpClient.Method.POST, data);
+    }
+
+    /**
+     * <p>执行POST表单请求</p>
+     *
+     * @param data 请求数据
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public HttpClient post(Map<String, String> data) throws NetException {
+        // 设置表单请求
+        this.header(HttpHeaderWrapper.HEADER_CONTENT_TYPE, "application/x-www-form-urlencoded;charset=" + SystemConfig.DEFAULT_CHARSET);
+        if(MapUtils.isEmpty(data)) {
+            return this.execute(HttpClient.Method.POST, null);
+        } else {
+            // 请求表单数据
+            final String body = MapUtils.toUrlQuery(data);
+            return this.execute(HttpClient.Method.POST, body);
+        }
+    }
+
+    /**
+     * <p>执行请求</p>
+     *
+     * @param method 请求方法
+     * @param body 请求数据
+     *
+     * @return {@link HttpClient}
+     *
+     * @throws NetException 网络异常
+     */
+    public HttpClient execute(HttpClient.Method method, String body) throws NetException {
+        OutputStream output = null;
+        try {
+            // 设置请求方式
+            this.httpURLConnection.setRequestMethod(method.name());
+            if(method == HttpClient.Method.GET) {
+                // 是否写出：GET不要写出
+                this.httpURLConnection.setDoOutput(false);
+            } else if(method == HttpClient.Method.HEAD) {
+                // 是否写出：HEAD不要写出
+                this.httpURLConnection.setDoOutput(false);
+            } else if(method == HttpClient.Method.POST) {
+                // 是否写出：POST需要写出
+                this.httpURLConnection.setDoOutput(true);
+            } else {
+                throw new NetException("不支持的请求方式：" + method);
+            }
+            // 发起连接
+            this.httpURLConnection.connect();
+            // 发送请求参数
+            if(body != null) {
+                output = this.httpURLConnection.getOutputStream();
+                output.write(body.getBytes());
+            }
+            // 设置状态码
+            this.code = this.httpURLConnection.getResponseCode();
+        } catch (IOException e) {
+            throw new NetException(e);
+        } finally {
+            IoUtils.close(output);
+        }
+        return this;
+    }
+
+    /**
+     * <p>获取状态码</p>
+     *
+     * @return 状态码
+     */
+    public int code() {
+        return this.code;
+    }
+
+    /**
+     * <p>判断状态码是否成功</p>
+     *
+     * @return 是否成功
+     */
+    public boolean ok() {
+        return HttpClient.StatusCode.OK.verifyCode(this.code);
+    }
+
+    /**
+     * <p>判断状态码是否部分内容</p>
+     *
+     * @return 是否部分内容
+     */
+    public boolean partialContent() {
+        return HttpClient.StatusCode.PARTIAL_CONTENT.verifyCode(this.code);
+    }
+
+    /**
+     * <p>判断状态码是否无法满足请求范围</p>
+     *
+     * @return 是否无法满足请求范围
+     */
+    public boolean requestedRangeNotSatisfiable() {
+        return HttpClient.StatusCode.REQUESTED_RANGE_NOT_SATISFIABLE.verifyCode(this.code);
+    }
+
+    /**
+     * <p>判断状态码是否服务器错误</p>
+     *
+     * @return 是否服务器错误
+     */
+    public boolean internalServerError() {
+        return HttpClient.StatusCode.INTERNAL_SERVER_ERROR.verifyCode(this.code);
+    }
+
+    /**
+     * <p>判断是否可以下载</p>
+     *
+     * @return 是否可以下载
+     *
+     * @see #ok()
+     * @see #partialContent()
+     */
+    public boolean downloadable() {
+        return this.ok() || this.partialContent();
+    }
+
+    /**
+     * <p>获取响应数据流</p>
+     * <p>使用完成需要关闭（归还连接）：下次相同地址端口继续使用（复用底层Socket）</p>
+     *
+     * @return 响应数据流
+     *
+     * @throws NetException 网络异常
+     */
+    public InputStream response() throws NetException {
+        try {
+            return this.httpURLConnection.getInputStream();
+        } catch (IOException e) {
+            throw new NetException(e);
+        }
+    }
+
+    /**
+     * <p>获取响应字节数组</p>
+     *
+     * @return 响应字节数组
+     *
+     * @throws NetException 网络异常
+     */
+    public byte[] responseToBytes() throws NetException {
+        final InputStream input = this.response();
+        try {
+            final int size = input.available();
+            final byte[] bytes = new byte[size];
+            final int length = input.read(bytes);
+            if(length == size) {
+                return bytes;
+            } else {
+                return Arrays.copyOf(bytes, length);
+            }
+        } catch (IOException e) {
+            throw new NetException(e);
+        } finally {
+            IoUtils.close(input);
+        }
+    }
+
+    /**
+     * <p>获取响应文本</p>
+     *
+     * @return 响应文本
+     *
+     * @throws NetException 网络异常
+     */
+    public String responseToString() throws NetException {
+        int length;
+        final InputStream input = this.response();
+        final byte[] bytes = new byte[SystemConfig.DEFAULT_EXCHANGE_LENGTH];
+        final StringBuilder builder = new StringBuilder();
+        try {
+            while((length = input.read(bytes)) >= 0) {
+                builder.append(new String(bytes, 0, length));
+            }
+        } catch (IOException e) {
+            throw new NetException(e);
+        } finally {
+            IoUtils.close(input);
+        }
+        return builder.toString();
+    }
+
+    /**
+     * <p>获取响应头</p>
+     *
+     * @return 响应头
+     */
+    public HttpHeaderWrapper responseHeader() {
+        if(this.httpHeaderWrapper == null) {
+            this.httpHeaderWrapper = HttpHeaderWrapper.newInstance(this.httpURLConnection.getHeaderFields());
+        }
+        return this.httpHeaderWrapper;
+    }
+
+    /**
+     * <p>关闭连接</p>
+     * <p>关闭连接和底层Socket：不能保持长连接</p>
+     *
+     * @return {@link HttpClient}
+     */
+    public HttpClient shutdown() {
+        this.httpURLConnection.disconnect();
+        return this;
+    }
+
+    /**
+     * <p>新建请求连接</p>
+     *
+     * @param connectTimeout 连接超时时间（毫秒）
+     * @param receiveTimeout 响应超时时间（毫秒）
+     *
+     * @return 请求连接
+     *
+     * @throws NetException 网络异常
+     */
+    private HttpURLConnection buildHttpURLConnection(int connectTimeout, int receiveTimeout) throws NetException {
+        try {
+            final URL requestUrl = new URL(this.url);
+            final HttpURLConnection connection = (HttpURLConnection) requestUrl.openConnection();
+            // 是否读取
+            connection.setDoInput(true);
+            // 是否缓存
+            connection.setUseCaches(false);
+            // 响应超时时间
+            connection.setReadTimeout(receiveTimeout);
+            // 连接超时时间
+            connection.setConnectTimeout(connectTimeout);
+            // 是否自动重定向
+//            connection.setInstanceFollowRedirects(true);
+            return connection;
+        } catch (IOException e) {
+            throw new NetException(e);
+        }
+    }
+
+    /**
+     * <p>设置默认请求头</p>
+     */
+    private void buildDefaultHeader() {
+        // 接收所有类型参数
+        this.header("Accept", "*/*");
+        // 设置客户端信息
+        this.header(HttpHeaderWrapper.HEADER_USER_AGENT, USER_AGENT);
+    }
+
+    /**
+     * <p>新建SSLContext</p>
+     *
+     * @return {@link SSLContext}
+     */
+    private static final SSLContext buildSSLContext() {
+        try {
+            // SSL协议：SSL、SSLv2、SSLv3、TLS、TLSv1、TLSv1.1、TLSv1.2、TLSv1.3
+            final SSLContext sslContext = SSLContext.getInstance("TLSv1.2");
+            sslContext.init(null, new X509TrustManager[] { HttpClient.TURTLETrustManager.INSTANCE }, NumberUtils.random());
+            return sslContext;
+        } catch (KeyManagementException | NoSuchAlgorithmException e) {
+            LOGGER.error("新建SSLContext异常", e);
+        }
+        try {
+            return SSLContext.getDefault();
+        } catch (NoSuchAlgorithmException e) {
+            LOGGER.error("新建SSLContext异常", e);
+        }
+        return null;
+    }
+
+    /**
+     * <p>域名验证</p>
+     *
+     * @author turtle
+     */
+    public static class TURTLEHostnameVerifier implements HostnameVerifier {
+
+        private static final HttpClient.TURTLEHostnameVerifier INSTANCE = new HttpClient.TURTLEHostnameVerifier();
+
+        private TURTLEHostnameVerifier() {
+        }
+
+        @Override
+        public boolean verify(String requestHost, SSLSession remoteSslSession) {
+            // 证书域名必须匹配
+            return requestHost.equalsIgnoreCase(remoteSslSession.getPeerHost());
+        }
+
+    }
+
+    /**
+     * <p>证书验证</p>
+     *
+     * @author turtle
+     */
+    public static class TURTLETrustManager implements X509TrustManager {
+
+        private static final HttpClient.TURTLETrustManager INSTANCE = new HttpClient.TURTLETrustManager();
+
+        private TURTLETrustManager() {
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
+        }
+
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+            if(chain == null) {
+                throw new CertificateException("证书验证失败");
+            }
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+            if(chain == null) {
+                throw new CertificateException("证书验证失败");
+            }
+        }
+
+    }
+
+}
+

@@ -1,0 +1,117 @@
+package com.turtle.protocol.hls;
+
+import com.turtle.context.HlsContext;
+import com.turtle.downloader.IDownloader;
+import com.turtle.downloader.hls.HlsDownloader;
+import com.turtle.exception.DownloadException;
+import com.turtle.exception.NetException;
+import com.turtle.model.ITaskSession;
+import com.turtle.model.M3u8;
+import com.turtle.model.wrapper.DescriptionWrapper;
+import com.turtle.net.http.HttpClient;
+import com.turtle.protocol.Protocol;
+import com.turtle.utils.FileUtils;
+
+/**
+ * <p>HLS协议</p>
+ * <p>协议链接：https://tools.ietf.org/html/rfc8216</p>
+ * 
+ * @author turtle
+ */
+public final class HlsProtocol extends Protocol {
+
+	private static final HlsProtocol INSTANCE = new HlsProtocol();
+	
+	public static final HlsProtocol getInstance() {
+		return INSTANCE;
+	}
+	
+	/**
+	 * <p>M3U8信息</p>
+	 */
+	private M3u8 m3u8;
+	
+	private HlsProtocol() {
+		super(Type.HLS, "HLS");
+	}
+
+	@Override
+	public boolean available() {
+		return true;
+	}
+
+	@Override
+	public IDownloader buildDownloader(ITaskSession taskSession) {
+		return HlsDownloader.newInstance(taskSession);
+	}
+	
+	@Override
+	protected void prep() throws DownloadException {
+		try {
+			this.buildM3u8();
+		} catch (NetException e) {
+			throw new DownloadException("网络异常", e);
+		}
+	}
+	
+	@Override
+	protected void buildSize() throws DownloadException {
+		this.taskEntity.setSize(0L);
+	}
+	
+	@Override
+	protected void done() throws DownloadException {
+		this.buildFolder();
+		this.selectFiles();
+	}
+
+	/**
+	 * <p>获取M3U8信息</p>
+	 * 
+	 * @throws NetException 网络异常
+	 * @throws DownloadException 下载异常
+	 */
+	private void buildM3u8() throws NetException, DownloadException {
+		final String response = HttpClient
+			.newInstance(this.url)
+			.get()
+			.responseToString();
+		final M3u8 m3u8Check = M3u8Builder.newInstance(response, this.url).build();
+		if(m3u8Check.getType() == M3u8.Type.M3U8) {
+			this.url = m3u8Check.maxRateLink();
+			this.buildM3u8();
+		} else if(m3u8Check.getType() == M3u8.Type.STREAM) {
+			throw new DownloadException("不支持直播流媒体下载");
+		} else {
+			this.m3u8 = m3u8Check;
+		}
+	}
+	
+	/**
+	 * <p>新建下载目录</p>
+	 */
+	private void buildFolder() {
+		FileUtils.buildFolder(this.taskEntity.getFile());
+	}
+	
+	/**
+	 * <p>保持下载文件列表</p>
+	 */
+	private void selectFiles() {
+		// M3U8协议默认下载所有文件
+		this.taskEntity.setDescription(DescriptionWrapper.newEncoder(this.m3u8.getLinks()).serialize());
+	}
+	
+	@Override
+	protected void success() {
+		// 成功添加管理
+		HlsContext.getInstance().m3u8(this.taskEntity.getId(), this.m3u8);
+	}
+	
+	@Override
+	protected void release(boolean success) {
+		this.m3u8 = null;
+		super.release(success);
+	}
+
+}
